@@ -1326,7 +1326,16 @@ function forum_print_overview($courses,&$htmlarray) {
     // Courses to search for new posts
     $coursessqls = array();
     $params = array();
+    //Array to hold groups
+    $groups = array();
     foreach ($courses as $course) {
+        // Get groups for course
+        $allgroups = groups_get_all_groups($course->id, $USER->id);
+        if ($allgroups) {
+            foreach ($allgroups as $id => $unused) {
+                $groups[$course->id][] = $id;
+            }
+        }
 
         // If the user has never entered into the course all posts are pending
         if ($course->lastaccess == 0) {
@@ -1343,23 +1352,34 @@ function forum_print_overview($courses,&$htmlarray) {
     $params[] = $USER->id;
     $coursessql = implode(' OR ', $coursessqls);
 
-    $sql = "SELECT f.id, COUNT(*) as count "
+    //Get posts per discussion
+    $sql = "SELECT d.id, f.id as forumid, d.groupid, COUNT(*) as count "
                 .'FROM {forum} f '
                 .'JOIN {forum_discussions} d ON d.forum  = f.id '
                 .'JOIN {forum_posts} p ON p.discussion = d.id '
                 ."WHERE ($coursessql) "
                 .'AND p.userid != ? '
-                .'GROUP BY f.id';
-
-    if (!$new = $DB->get_records_sql($sql, $params)) {
-        $new = array(); // avoid warnings
+                .'GROUP BY d.id';
+    if (!$discussions = $DB->get_records_sql($sql, $params)) {
+        $discussions = array(); // avoid warnings
     }
+    $new = array();
 
     // also get all forum tracking stuff ONCE.
     $trackingforums = array();
     foreach ($forums as $forum) {
         if (forum_tp_can_track_forums($forum)) {
             $trackingforums[$forum->id] = $forum;
+        }
+
+        //Check for new posts in each forum
+        $new[$forum->id] = array();
+        foreach ($discussions as $disc) {
+            if ($disc->forumid == $forum->id) {
+                $new[$forum->id][$disc->id] = new stdClass();
+                $new[$forum->id][$disc->id]->groupid = $disc->groupid;
+                $new[$forum->id][$disc->id]->count = $disc->count;
+            }
         }
     }
 
@@ -1414,7 +1434,23 @@ function forum_print_overview($courses,&$htmlarray) {
         $showunread = false;
         // either we have something from logs, or trackposts, or nothing.
         if (array_key_exists($forum->id, $new) && !empty($new[$forum->id])) {
-            $count = $new[$forum->id]->count;
+            //Count new posts per forum, depending on group status.
+            $modcontext = context_module::instance($forum->coursemodule);
+            if ($forum->groupmode == 0 || has_capability('moodle/site:accessallgroups', $modcontext)) {
+                //There are no groups in the forum, or the user can see all groups. Add all new posts from all discussions.
+                foreach ($new[$forum->id] as $disc) {
+                    $count += $disc->count;
+                }
+            } else {
+                //Separate groups, or visible groups in the forum. Add only posts from discussions
+                //for the user's group, or for all participants.
+                foreach ($new[$forum->id] as $disc) {
+                    if (in_array($disc->groupid,$groups[$forum->course]) || $disc->groupid == 0
+                                || $disc->groupid == -1) {
+                        $count += $disc->count;
+                    }
+                }
+            }
         }
         if (array_key_exists($forum->id,$unread)) {
             $thisunread = $unread[$forum->id]->count;
